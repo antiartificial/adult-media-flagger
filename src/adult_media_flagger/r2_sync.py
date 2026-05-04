@@ -4,6 +4,7 @@ import hashlib
 import os
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -202,6 +203,14 @@ def retry(operation: Callable[[], None], attempts: int, delay_seconds: float) ->
         raise last_exc
 
 
+def upload_one(client, path: Path, bucket: str, key: str, retries: int) -> tuple[bool, str | None]:
+    try:
+        retry(lambda: client.upload_file(str(path), bucket, key), retries, 1.0)
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
 def upload_directory(
     root: Path,
     bucket: str,
@@ -214,6 +223,7 @@ def upload_directory(
     manifest_path: Path | None = None,
     state_path: Path | None = None,
     retries: int = 3,
+    workers: int = 4,
     progress: Progress | None = None,
 ) -> SyncSummary:
     client = make_r2_client(endpoint_url)
@@ -224,6 +234,7 @@ def upload_directory(
 
     uploaded = skipped = failed = bytes_uploaded = 0
     try:
+        pending_uploads: list[tuple[int, Path, str, dict]] = []
         for index, path in enumerate(files, start=1):
             key = object_key(root, path.resolve(), prefix)
             identity = file_identity(path)
@@ -247,18 +258,29 @@ def upload_directory(
                     progress("dry-run", path, index, len(files))
                 continue
 
-            try:
-                retry(lambda: client.upload_file(str(path), bucket, key), retries, 1.0)
-                state.record(bucket, key, path, identity, "uploaded")
-                uploaded += 1
-                bytes_uploaded += identity["size"]
-                if progress:
-                    progress("upload", path, index, len(files))
-            except Exception as exc:
-                state.record(bucket, key, path, identity, "failed", error=str(exc))
-                failed += 1
-                if progress:
-                    progress("failed", path, index, len(files))
+            pending_uploads.append((index, path, key, identity))
+
+        if pending_uploads:
+            worker_count = max(1, workers)
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(upload_one, client, path, bucket, key, retries): (index, path, key, identity)
+                    for index, path, key, identity in pending_uploads
+                }
+                for future in as_completed(futures):
+                    index, path, key, identity = futures[future]
+                    ok, error = future.result()
+                    if ok:
+                        state.record(bucket, key, path, identity, "uploaded")
+                        uploaded += 1
+                        bytes_uploaded += identity["size"]
+                        if progress:
+                            progress("upload", path, index, len(files))
+                    else:
+                        state.record(bucket, key, path, identity, "failed", error=error)
+                        failed += 1
+                        if progress:
+                            progress("failed", path, index, len(files))
     finally:
         state.close()
 

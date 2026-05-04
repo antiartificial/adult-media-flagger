@@ -55,6 +55,7 @@ def main() -> None:
     upload_parser.add_argument("--no-skip-existing", action="store_true", help="Upload even if state DB says file is done")
     upload_parser.add_argument("--verify-remote", action="store_true", help="HEAD remote objects before upload")
     upload_parser.add_argument("--retries", type=int, default=3)
+    upload_parser.add_argument("--workers", type=int, default=4, help="Concurrent file uploads")
 
     download_parser = subparsers.add_parser("r2-download", help="Download a Cloudflare R2 prefix")
     download_parser.add_argument("output_dir")
@@ -92,6 +93,7 @@ def main() -> None:
             verify_remote=args.verify_remote,
             state_path=Path(args.state_db or args.manifest) if (args.state_db or args.manifest) else None,
             retries=args.retries,
+            workers=args.workers,
             progress=print_progress,
         )
         print_upload_summary(summary, bucket, prefix)

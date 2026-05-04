@@ -249,6 +249,14 @@ Run the upload:
 adult-flag r2-upload /path/to/field-theory-media --prefix twitter-media
 ```
 
+Increase file-level concurrency for many small/medium files:
+
+```fish
+adult-flag r2-upload /path/to/field-theory-media --prefix twitter-media --workers 8
+```
+
+The default is `--workers 4`. Boto3 already handles multipart transfer concurrency within large files; this option adds concurrency across files. If you see throttling or transient network errors, lower `--workers` or increase `--retries`.
+
 Resume after interruption:
 
 ```fish
@@ -302,7 +310,7 @@ Upload media with resume state:
 
 ```fish
 make r2-upload-dry-run MEDIA_DIR=/path/to/field-theory-media
-make r2-upload MEDIA_DIR=/path/to/field-theory-media
+make r2-upload MEDIA_DIR=/path/to/field-theory-media WORKERS=8
 ```
 
 Scan/process/export locally:

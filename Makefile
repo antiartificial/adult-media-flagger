@@ -10,6 +10,7 @@ PREFIX ?= twitter-media
 RESULTS_PREFIX ?= twitter-results
 STATE_DB ?= .adult-flag-r2-upload-$(subst /,_,$(PREFIX)).sqlite
 LLAVA ?= review
+WORKERS ?= 4
 
 .PHONY: help install install-dev install-all test config-check scan process export r2-upload-dry-run r2-upload r2-download
 
@@ -57,12 +58,11 @@ export:
 
 r2-upload-dry-run:
 	@test -n "$(MEDIA_DIR)" || (echo "Set MEDIA_DIR=/path/to/media" && exit 2)
-	$(ADULT_FLAG) r2-upload "$(MEDIA_DIR)" --prefix "$(PREFIX)" --state-db "$(STATE_DB)" --dry-run
+	$(ADULT_FLAG) r2-upload "$(MEDIA_DIR)" --prefix "$(PREFIX)" --state-db "$(STATE_DB)" --workers "$(WORKERS)" --dry-run
 
 r2-upload:
 	@test -n "$(MEDIA_DIR)" || (echo "Set MEDIA_DIR=/path/to/media" && exit 2)
-	$(ADULT_FLAG) r2-upload "$(MEDIA_DIR)" --prefix "$(PREFIX)" --state-db "$(STATE_DB)"
+	$(ADULT_FLAG) r2-upload "$(MEDIA_DIR)" --prefix "$(PREFIX)" --state-db "$(STATE_DB)" --workers "$(WORKERS)"
 
 r2-download:
 	$(ADULT_FLAG) r2-download "$(DOWNLOAD_DIR)" --prefix "$(PREFIX)"
-
