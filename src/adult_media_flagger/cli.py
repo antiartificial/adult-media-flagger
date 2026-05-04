@@ -13,7 +13,7 @@ except Exception:
 from .config import LlavaSettings, Thresholds, VideoSettings
 from .env import config_status, load_env_file
 from .processor import process_unprocessed
-from .r2_sync import download_prefix, upload_directory
+from .r2_sync import SyncSummary, download_prefix, upload_directory
 from .scanner import scan_media
 from .store import Store, write_jsonl
 
@@ -49,12 +49,20 @@ def main() -> None:
     upload_parser.add_argument("--bucket", default=None)
     upload_parser.add_argument("--prefix", default=None)
     upload_parser.add_argument("--endpoint-url", default=None)
+    upload_parser.add_argument("--manifest", default=None, help="Upload manifest JSONL path")
+    upload_parser.add_argument("--dry-run", action="store_true", help="Plan upload without sending files")
+    upload_parser.add_argument("--no-skip-existing", action="store_true", help="Upload even if manifest says file is done")
+    upload_parser.add_argument("--verify-remote", action="store_true", help="HEAD remote objects before upload")
+    upload_parser.add_argument("--retries", type=int, default=3)
 
     download_parser = subparsers.add_parser("r2-download", help="Download a Cloudflare R2 prefix")
     download_parser.add_argument("output_dir")
     download_parser.add_argument("--bucket", default=None)
     download_parser.add_argument("--prefix", default=None)
     download_parser.add_argument("--endpoint-url", default=None)
+    download_parser.add_argument("--dry-run", action="store_true", help="Plan download without writing files")
+    download_parser.add_argument("--no-skip-existing", action="store_true", help="Download even if local file exists")
+    download_parser.add_argument("--retries", type=int, default=3)
 
     subparsers.add_parser("config-check", help="Show loaded configuration without revealing secrets")
 
@@ -73,14 +81,34 @@ def main() -> None:
     if args.command == "r2-upload":
         bucket = require_value(args.bucket or os.environ.get("ADULT_FLAG_R2_BUCKET"), "bucket")
         prefix = args.prefix if args.prefix is not None else os.environ.get("ADULT_FLAG_R2_MEDIA_PREFIX", "")
-        count = upload_directory(Path(args.input_dir), bucket, prefix, args.endpoint_url)
-        print(f"Uploaded {count} files to r2://{bucket}/{prefix}")
+        summary = upload_directory(
+            Path(args.input_dir),
+            bucket,
+            prefix,
+            args.endpoint_url,
+            dry_run=args.dry_run,
+            skip_existing=not args.no_skip_existing,
+            verify_remote=args.verify_remote,
+            manifest_path=Path(args.manifest) if args.manifest else None,
+            retries=args.retries,
+            progress=print_progress,
+        )
+        print_upload_summary(summary, bucket, prefix)
         return
     if args.command == "r2-download":
         bucket = require_value(args.bucket or os.environ.get("ADULT_FLAG_R2_BUCKET"), "bucket")
         prefix = args.prefix if args.prefix is not None else os.environ.get("ADULT_FLAG_R2_MEDIA_PREFIX", "")
-        count = download_prefix(Path(args.output_dir), bucket, prefix, args.endpoint_url)
-        print(f"Downloaded {count} files from r2://{bucket}/{prefix}")
+        summary = download_prefix(
+            Path(args.output_dir),
+            bucket,
+            prefix,
+            args.endpoint_url,
+            dry_run=args.dry_run,
+            skip_existing=not args.no_skip_existing,
+            retries=args.retries,
+            progress=print_progress,
+        )
+        print_download_summary(summary, bucket, prefix)
         return
 
     store = Store(Path(args.db))
@@ -115,6 +143,31 @@ def require_value(value: str | None, name: str) -> str:
     if not value:
         raise SystemExit(f"Missing {name}. Pass --{name} or set ADULT_FLAG_R2_BUCKET in .env")
     return value
+
+
+def print_progress(action: str, path: Path | str, index: int, total: int) -> None:
+    total_text = str(total) if total else "?"
+    print(f"[{index}/{total_text}] {action}: {path}")
+
+
+def print_upload_summary(summary: SyncSummary, bucket: str, prefix: str) -> None:
+    print(
+        "Upload summary: "
+        f"uploaded={summary.uploaded}, skipped={summary.skipped}, "
+        f"failed={summary.failed}, planned={summary.planned}, "
+        f"bytes_uploaded={summary.bytes_uploaded}"
+    )
+    print(f"Target: r2://{bucket}/{prefix}")
+
+
+def print_download_summary(summary: SyncSummary, bucket: str, prefix: str) -> None:
+    print(
+        "Download summary: "
+        f"downloaded={summary.downloaded}, skipped={summary.skipped}, "
+        f"failed={summary.failed}, planned={summary.planned}, "
+        f"bytes_downloaded={summary.bytes_downloaded}"
+    )
+    print(f"Source: r2://{bucket}/{prefix}")
 
 
 if __name__ == "__main__":

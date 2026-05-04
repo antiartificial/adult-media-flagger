@@ -229,6 +229,46 @@ Once `.env` is configured, upload the downloaded media folder from the Mac:
 adult-flag r2-upload /path/to/field-theory-media --prefix twitter-media
 ```
 
+The uploader is resumable. By default it writes a JSONL manifest next to the uploaded folder, named like:
+
+```text
+.adult-flag-r2-upload-twitter-media.jsonl
+```
+
+Each completed upload records the local path, R2 key, file size, mtime, SHA-256, and status. If the command is interrupted, run the same command again and already uploaded files will be skipped from the manifest.
+
+Plan a large upload first:
+
+```fish
+adult-flag r2-upload /path/to/field-theory-media --prefix twitter-media --dry-run
+```
+
+Run the upload:
+
+```fish
+adult-flag r2-upload /path/to/field-theory-media --prefix twitter-media
+```
+
+Resume after interruption:
+
+```fish
+adult-flag r2-upload /path/to/field-theory-media --prefix twitter-media
+```
+
+If you want the script to also check R2 for matching objects before uploading, useful after changing machines or losing the manifest:
+
+```fish
+adult-flag r2-upload /path/to/field-theory-media --prefix twitter-media --verify-remote
+```
+
+Use an explicit manifest path if you want to keep upload state in a project folder:
+
+```fish
+adult-flag r2-upload /path/to/field-theory-media \
+  --prefix twitter-media \
+  --manifest ./twitter-media-upload-manifest.jsonl
+```
+
 On the Linux processing box:
 
 ```fish
