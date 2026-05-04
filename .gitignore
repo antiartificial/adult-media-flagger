@@ -14,9 +14,11 @@ token.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.sqlite-journal
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
 *.jsonl
 media_flags*.json
 media_flags*.csv

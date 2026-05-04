@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
+import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,36 +76,100 @@ def file_identity(path: Path) -> dict:
     }
 
 
-def default_manifest_path(root: Path, prefix: str) -> Path:
+def default_state_path(root: Path, prefix: str) -> Path:
     safe_prefix = prefix.strip("/").replace("/", "_") or "root"
-    return root.parent / f".adult-flag-r2-upload-{safe_prefix}.jsonl"
+    return root.parent / f".adult-flag-r2-upload-{safe_prefix}.sqlite"
 
 
-def load_manifest(path: Path | None) -> dict[str, dict]:
-    if not path or not path.exists():
-        return {}
-    records: dict[str, dict] = {}
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            key = record.get("key")
-            if key:
-                records[key] = record
-    return records
+class UploadState:
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.conn: sqlite3.Connection | None = None
+        if path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(path)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS uploads (
+                  bucket TEXT NOT NULL,
+                  object_key TEXT NOT NULL,
+                  local_path TEXT NOT NULL,
+                  size INTEGER NOT NULL,
+                  mtime_ns INTEGER NOT NULL,
+                  sha256 TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  error TEXT,
+                  verified_remote INTEGER NOT NULL DEFAULT 0,
+                  updated_at REAL NOT NULL,
+                  PRIMARY KEY (bucket, object_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status);
+                CREATE INDEX IF NOT EXISTS idx_uploads_local_path ON uploads(local_path);
+                """
+            )
+            self.conn.commit()
+
+    def close(self) -> None:
+        if self.conn:
+            self.conn.close()
+
+    def get(self, bucket: str, key: str) -> dict | None:
+        if not self.conn:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM uploads WHERE bucket = ? AND object_key = ?",
+            (bucket, key),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def record(
+        self,
+        bucket: str,
+        key: str,
+        path: Path,
+        identity: dict,
+        status: str,
+        *,
+        error: str | None = None,
+        verified_remote: bool = False,
+    ) -> None:
+        if not self.conn:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO uploads (
+              bucket, object_key, local_path, size, mtime_ns, sha256,
+              status, error, verified_remote, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(bucket, object_key) DO UPDATE SET
+              local_path=excluded.local_path,
+              size=excluded.size,
+              mtime_ns=excluded.mtime_ns,
+              sha256=excluded.sha256,
+              status=excluded.status,
+              error=excluded.error,
+              verified_remote=excluded.verified_remote,
+              updated_at=excluded.updated_at
+            """,
+            (
+                bucket,
+                key,
+                str(path),
+                identity["size"],
+                identity["mtime_ns"],
+                identity["sha256"],
+                status,
+                error,
+                1 if verified_remote else 0,
+                time.time(),
+            ),
+        )
+        self.conn.commit()
 
 
-def append_manifest(path: Path | None, record: dict) -> None:
-    if not path:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
-
-
-def manifest_matches(record: dict | None, identity: dict) -> bool:
+def state_matches(record: dict | None, identity: dict) -> bool:
     if not record:
         return False
     return (
@@ -148,84 +212,55 @@ def upload_directory(
     skip_existing: bool = True,
     verify_remote: bool = False,
     manifest_path: Path | None = None,
+    state_path: Path | None = None,
     retries: int = 3,
     progress: Progress | None = None,
 ) -> SyncSummary:
     client = make_r2_client(endpoint_url)
     root = root.resolve()
-    manifest = manifest_path or default_manifest_path(root, prefix)
-    manifest_records = load_manifest(manifest)
+    state_file = state_path or manifest_path or default_state_path(root, prefix)
+    state = UploadState(state_file)
     files = list(iter_upload_files(root))
-    summary = SyncSummary(planned=len(files))
 
     uploaded = skipped = failed = bytes_uploaded = 0
-    for index, path in enumerate(files, start=1):
-        key = object_key(root, path.resolve(), prefix)
-        identity = file_identity(path)
+    try:
+        for index, path in enumerate(files, start=1):
+            key = object_key(root, path.resolve(), prefix)
+            identity = file_identity(path)
 
-        if skip_existing and manifest_matches(manifest_records.get(key), identity):
-            skipped += 1
-            if progress:
-                progress("skip-manifest", path, index, len(files))
-            continue
+            if skip_existing and state_matches(state.get(bucket, key), identity):
+                skipped += 1
+                if progress:
+                    progress("skip-state", path, index, len(files))
+                continue
 
-        if skip_existing and verify_remote and remote_object_matches(client, bucket, key, identity["size"]):
-            append_manifest(
-                manifest,
-                {
-                    "status": "uploaded",
-                    "bucket": bucket,
-                    "key": key,
-                    "path": str(path),
-                    **identity,
-                    "verified_remote": True,
-                    "uploaded_at": time.time(),
-                },
-            )
-            skipped += 1
-            if progress:
-                progress("skip-remote", path, index, len(files))
-            continue
+            if skip_existing and verify_remote and remote_object_matches(client, bucket, key, identity["size"]):
+                state.record(bucket, key, path, identity, "uploaded", verified_remote=True)
+                skipped += 1
+                if progress:
+                    progress("skip-remote", path, index, len(files))
+                continue
 
-        if dry_run:
-            skipped += 1
-            if progress:
-                progress("dry-run", path, index, len(files))
-            continue
+            if dry_run:
+                skipped += 1
+                if progress:
+                    progress("dry-run", path, index, len(files))
+                continue
 
-        try:
-            retry(lambda: client.upload_file(str(path), bucket, key), retries, 1.0)
-            append_manifest(
-                manifest,
-                {
-                    "status": "uploaded",
-                    "bucket": bucket,
-                    "key": key,
-                    "path": str(path),
-                    **identity,
-                    "uploaded_at": time.time(),
-                },
-            )
-            uploaded += 1
-            bytes_uploaded += identity["size"]
-            if progress:
-                progress("upload", path, index, len(files))
-        except Exception as exc:
-            append_manifest(
-                manifest,
-                {
-                    "status": "failed",
-                    "bucket": bucket,
-                    "key": key,
-                    "path": str(path),
-                    **identity,
-                    "error": str(exc),
-                    "failed_at": time.time(),
-                },
-            )
-            failed += 1
-            if progress:
-                progress("failed", path, index, len(files))
+            try:
+                retry(lambda: client.upload_file(str(path), bucket, key), retries, 1.0)
+                state.record(bucket, key, path, identity, "uploaded")
+                uploaded += 1
+                bytes_uploaded += identity["size"]
+                if progress:
+                    progress("upload", path, index, len(files))
+            except Exception as exc:
+                state.record(bucket, key, path, identity, "failed", error=str(exc))
+                failed += 1
+                if progress:
+                    progress("failed", path, index, len(files))
+    finally:
+        state.close()
 
     return SyncSummary(
         uploaded=uploaded,

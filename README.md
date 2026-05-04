@@ -229,13 +229,13 @@ Once `.env` is configured, upload the downloaded media folder from the Mac:
 adult-flag r2-upload /path/to/field-theory-media --prefix twitter-media
 ```
 
-The uploader is resumable. By default it writes a JSONL manifest next to the uploaded folder, named like:
+The uploader is resumable. By default it writes a compact SQLite state database next to the uploaded folder, named like:
 
 ```text
-.adult-flag-r2-upload-twitter-media.jsonl
+.adult-flag-r2-upload-twitter-media.sqlite
 ```
 
-Each completed upload records the local path, R2 key, file size, mtime, SHA-256, and status. If the command is interrupted, run the same command again and already uploaded files will be skipped from the manifest.
+Each completed upload records the local path, R2 key, file size, mtime, SHA-256, and status. If the command is interrupted, run the same command again and already uploaded files will be skipped from the SQLite state.
 
 Plan a large upload first:
 
@@ -261,12 +261,12 @@ If you want the script to also check R2 for matching objects before uploading, u
 adult-flag r2-upload /path/to/field-theory-media --prefix twitter-media --verify-remote
 ```
 
-Use an explicit manifest path if you want to keep upload state in a project folder:
+Use an explicit state database path if you want to keep upload state in a project folder:
 
 ```fish
 adult-flag r2-upload /path/to/field-theory-media \
   --prefix twitter-media \
-  --manifest ./twitter-media-upload-manifest.jsonl
+  --state-db ./twitter-media-upload-state.sqlite
 ```
 
 On the Linux processing box:
@@ -287,6 +287,31 @@ adult-flag r2-upload /data/media-results --prefix twitter-results
 ```
 
 Do not commit downloaded media, `.env`, SQLite databases, or JSONL exports to git.
+
+## Makefile shortcuts
+
+The Makefile wraps the common commands. In fish with virtualfish active:
+
+```fish
+make install-all
+make test
+make config-check
+```
+
+Upload media with resume state:
+
+```fish
+make r2-upload-dry-run MEDIA_DIR=/path/to/field-theory-media
+make r2-upload MEDIA_DIR=/path/to/field-theory-media
+```
+
+Scan/process/export locally:
+
+```fish
+make scan MEDIA_DIR=/path/to/field-theory-media
+make process
+make export
+```
 
 ## Public repository safety
 

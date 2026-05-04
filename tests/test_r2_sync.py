@@ -1,10 +1,10 @@
 from pathlib import Path
 
 from adult_media_flagger.r2_sync import (
-    default_manifest_path,
-    load_manifest,
-    manifest_matches,
+    UploadState,
+    default_state_path,
     object_key,
+    state_matches,
 )
 
 
@@ -20,24 +20,25 @@ def test_object_key_without_prefix():
     assert object_key(root, path, "") == "sub/file.jpg"
 
 
-def test_default_manifest_path_is_outside_root():
+def test_default_state_path_is_outside_root():
     root = Path("/tmp/media")
-    manifest = default_manifest_path(root, "twitter/media")
-    assert manifest == Path("/tmp/.adult-flag-r2-upload-twitter_media.jsonl")
+    state = default_state_path(root, "twitter/media")
+    assert state == Path("/tmp/.adult-flag-r2-upload-twitter_media.sqlite")
 
 
-def test_load_manifest_keeps_latest_record(tmp_path):
-    manifest = tmp_path / "manifest.jsonl"
-    manifest.write_text(
-        '{"key":"a","status":"failed"}\n'
-        '{"key":"a","status":"uploaded","size":1,"mtime_ns":2,"sha256":"x"}\n',
-        encoding="utf-8",
-    )
-    assert load_manifest(manifest)["a"]["status"] == "uploaded"
-
-
-def test_manifest_matches_identity():
+def test_upload_state_upserts_latest_record(tmp_path):
     identity = {"size": 1, "mtime_ns": 2, "sha256": "x"}
-    assert manifest_matches({"status": "uploaded", **identity}, identity)
-    assert not manifest_matches({"status": "failed", **identity}, identity)
+    state = UploadState(tmp_path / "state.sqlite")
+    try:
+        state.record("bucket", "key", tmp_path / "file.jpg", identity, "failed", error="boom")
+        state.record("bucket", "key", tmp_path / "file.jpg", identity, "uploaded")
+        assert state.get("bucket", "key")["status"] == "uploaded"
+        assert state.get("bucket", "key")["error"] is None
+    finally:
+        state.close()
 
+
+def test_state_matches_identity():
+    identity = {"size": 1, "mtime_ns": 2, "sha256": "x"}
+    assert state_matches({"status": "uploaded", **identity}, identity)
+    assert not state_matches({"status": "failed", **identity}, identity)

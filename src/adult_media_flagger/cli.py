@@ -49,9 +49,10 @@ def main() -> None:
     upload_parser.add_argument("--bucket", default=None)
     upload_parser.add_argument("--prefix", default=None)
     upload_parser.add_argument("--endpoint-url", default=None)
-    upload_parser.add_argument("--manifest", default=None, help="Upload manifest JSONL path")
+    upload_parser.add_argument("--state-db", default=None, help="SQLite upload state DB path")
+    upload_parser.add_argument("--manifest", default=None, help=argparse.SUPPRESS)
     upload_parser.add_argument("--dry-run", action="store_true", help="Plan upload without sending files")
-    upload_parser.add_argument("--no-skip-existing", action="store_true", help="Upload even if manifest says file is done")
+    upload_parser.add_argument("--no-skip-existing", action="store_true", help="Upload even if state DB says file is done")
     upload_parser.add_argument("--verify-remote", action="store_true", help="HEAD remote objects before upload")
     upload_parser.add_argument("--retries", type=int, default=3)
 
@@ -89,7 +90,7 @@ def main() -> None:
             dry_run=args.dry_run,
             skip_existing=not args.no_skip_existing,
             verify_remote=args.verify_remote,
-            manifest_path=Path(args.manifest) if args.manifest else None,
+            state_path=Path(args.state_db or args.manifest) if (args.state_db or args.manifest) else None,
             retries=args.retries,
             progress=print_progress,
         )
