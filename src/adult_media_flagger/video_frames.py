@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -13,15 +14,25 @@ class FfmpegUnavailable(RuntimeError):
     pass
 
 
-def require_tool(name: str) -> None:
-    if shutil.which(name) is None:
+def tool_command(name: str) -> str:
+    env_name = f"ADULT_FLAG_{name.upper()}"
+    configured = os.environ.get(env_name)
+    if configured:
+        configured_path = Path(configured)
+        if configured_path.exists():
+            return str(configured_path)
+        raise FfmpegUnavailable(f"{env_name} points to missing file: {configured}")
+
+    found = shutil.which(name)
+    if found is None:
         raise FfmpegUnavailable(f"{name} was not found on PATH")
+    return found
 
 
 def video_duration_seconds(path: Path) -> float | None:
-    require_tool("ffprobe")
+    ffprobe = tool_command("ffprobe")
     cmd = [
-        "ffprobe",
+        ffprobe,
         "-v",
         "error",
         "-show_entries",
@@ -37,7 +48,7 @@ def video_duration_seconds(path: Path) -> float | None:
 
 
 def sample_video_frames(path: Path, settings: VideoSettings) -> list[tuple[float, Path]]:
-    require_tool("ffmpeg")
+    ffmpeg = tool_command("ffmpeg")
     duration = video_duration_seconds(path)
     if not duration or duration <= 0:
         return []
@@ -51,26 +62,64 @@ def sample_video_frames(path: Path, settings: VideoSettings) -> list[tuple[float
     frames: list[tuple[float, Path]] = []
     for index, timestamp in enumerate(timestamps):
         output = temp_dir / f"frame-{index:04d}-{timestamp:.2f}.jpg"
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{timestamp:.3f}",
-            "-i",
-            str(path),
-            "-frames:v",
-            "1",
-            "-q:v",
-            str(31 - max(2, min(settings.jpeg_quality, 95)) // 4),
-            "-y",
-            str(output),
-        ]
-        subprocess.run(cmd, check=True)
+        extract_video_frame(ffmpeg, path, timestamp, output, settings)
         if output.exists():
             frames.append((timestamp, output))
     return frames
+
+
+def extract_video_frame(ffmpeg: str, path: Path, timestamp: float, output: Path, settings: VideoSettings) -> None:
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{timestamp:.3f}",
+        "-i",
+        str(path),
+        "-frames:v",
+        "1",
+        "-q:v",
+        str(31 - max(2, min(settings.jpeg_quality, 95)) // 4),
+        "-y",
+        str(output),
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+        return
+    except subprocess.CalledProcessError:
+        output.unlink(missing_ok=True)
+
+    # Some videos fail FFmpeg's MJPEG encoder on Windows. PNG avoids that encoder
+    # path and gives Pillow/opennsfw2 a lossless image to score.
+    fallback_output = output.with_suffix(".png")
+    fallback_cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{timestamp:.3f}",
+        "-i",
+        str(path),
+        "-frames:v",
+        "1",
+        "-f",
+        "image2",
+        "-vcodec",
+        "png",
+        "-vf",
+        "format=rgba",
+        "-update",
+        "1",
+        "-y",
+        str(fallback_output),
+    ]
+    subprocess.run(fallback_cmd, check=True)
+    if not fallback_output.exists():
+        raise RuntimeError(f"ffmpeg fallback did not write frame: {fallback_output}")
+    fallback_output.replace(output)
 
 
 def cleanup_sampled_frames(frames: list[tuple[float, Path]]) -> None:

@@ -22,6 +22,11 @@ token.json
 *.jsonl
 media_flags*.json
 media_flags*.csv
+duplicate-media*.csv
+duplicate-media*.txt
+.cache/
+sample-media/
+tools/
 
 # Python/dev caches
 __pycache__/
@@ -31,6 +36,10 @@ venv/
 build/
 dist/
 *.egg-info/
+node_modules/
+review-app/dist/
+review-app/public/app.js
+review-app/public/app.js.map
 
 # OS/editor noise
 .DS_Store

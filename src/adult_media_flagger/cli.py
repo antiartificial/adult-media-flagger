@@ -62,10 +62,13 @@ def main() -> None:
     download_parser.add_argument("--bucket", default=None)
     download_parser.add_argument("--prefix", default=None)
     download_parser.add_argument("--endpoint-url", default=None)
+    download_parser.add_argument("--state-db", default=None, help="SQLite download state DB path")
     download_parser.add_argument("--dry-run", action="store_true", help="Plan download without writing files")
     download_parser.add_argument("--no-skip-existing", action="store_true", help="Download even if local file exists")
     download_parser.add_argument("--retries", type=int, default=3)
+    download_parser.add_argument("--workers", type=int, default=4, help="Concurrent file downloads")
 
+    subparsers.add_parser("clear-errors", help="Clear errored processing results so they can be retried")
     subparsers.add_parser("config-check", help="Show loaded configuration without revealing secrets")
 
     args = parser.parse_args()
@@ -108,7 +111,9 @@ def main() -> None:
             args.endpoint_url,
             dry_run=args.dry_run,
             skip_existing=not args.no_skip_existing,
+            state_path=Path(args.state_db) if args.state_db else None,
             retries=args.retries,
+            workers=args.workers,
             progress=print_progress,
         )
         print_download_summary(summary, bucket, prefix)
@@ -116,7 +121,10 @@ def main() -> None:
 
     store = Store(Path(args.db))
     try:
-        if args.command == "scan":
+        if args.command == "clear-errors":
+            deleted = store.clear_error_results()
+            print(f"Cleared {deleted} errored results from {args.db}")
+        elif args.command == "scan":
             scanned = 0
             for item in tqdm(scan_media(Path(args.input_dir)), desc="Scanning"):
                 store.upsert_media(item)

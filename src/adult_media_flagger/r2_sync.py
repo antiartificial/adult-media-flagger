@@ -82,6 +82,11 @@ def default_state_path(root: Path, prefix: str) -> Path:
     return root.parent / f".adult-flag-r2-upload-{safe_prefix}.sqlite"
 
 
+def default_download_state_path(output_dir: Path, prefix: str) -> Path:
+    safe_prefix = prefix.strip("/").replace("/", "_") or "root"
+    return output_dir / f".adult-flag-r2-download-{safe_prefix}.sqlite"
+
+
 class UploadState:
     def __init__(self, path: Path | None):
         self.path = path
@@ -181,6 +186,112 @@ def state_matches(record: dict | None, identity: dict) -> bool:
     )
 
 
+class DownloadState:
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.conn: sqlite3.Connection | None = None
+        if path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(path)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS downloads (
+                  bucket TEXT NOT NULL,
+                  object_key TEXT NOT NULL,
+                  local_path TEXT NOT NULL,
+                  size INTEGER NOT NULL,
+                  etag TEXT,
+                  last_modified TEXT,
+                  status TEXT NOT NULL,
+                  error TEXT,
+                  updated_at REAL NOT NULL,
+                  PRIMARY KEY (bucket, object_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status);
+                CREATE INDEX IF NOT EXISTS idx_downloads_local_path ON downloads(local_path);
+                """
+            )
+            self.conn.commit()
+
+    def close(self) -> None:
+        if self.conn:
+            self.conn.close()
+
+    def get(self, bucket: str, key: str) -> dict | None:
+        if not self.conn:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM downloads WHERE bucket = ? AND object_key = ?",
+            (bucket, key),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def record(
+        self,
+        bucket: str,
+        key: str,
+        path: Path,
+        identity: dict,
+        status: str,
+        *,
+        error: str | None = None,
+    ) -> None:
+        if not self.conn:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO downloads (
+              bucket, object_key, local_path, size, etag,
+              last_modified, status, error, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(bucket, object_key) DO UPDATE SET
+              local_path=excluded.local_path,
+              size=excluded.size,
+              etag=excluded.etag,
+              last_modified=excluded.last_modified,
+              status=excluded.status,
+              error=excluded.error,
+              updated_at=excluded.updated_at
+            """,
+            (
+                bucket,
+                key,
+                str(path),
+                identity["size"],
+                identity.get("etag"),
+                identity.get("last_modified"),
+                status,
+                error,
+                time.time(),
+            ),
+        )
+        self.conn.commit()
+
+
+def download_state_matches(record: dict | None, identity: dict, path: Path) -> bool:
+    if not record or not path.exists():
+        return False
+    if path.stat().st_size != identity["size"]:
+        return False
+    return (
+        record.get("size") == identity["size"]
+        and record.get("etag") == identity.get("etag")
+        and record.get("last_modified") == identity.get("last_modified")
+        and record.get("status") == "downloaded"
+    )
+
+
+def remote_identity(item: dict) -> dict:
+    last_modified = item.get("LastModified")
+    return {
+        "size": int(item.get("Size", 0)),
+        "etag": item.get("ETag", "").strip('"') or None,
+        "last_modified": last_modified.isoformat() if hasattr(last_modified, "isoformat") else str(last_modified or ""),
+    }
+
+
 def remote_object_matches(client, bucket: str, key: str, size: int) -> bool:
     try:
         response = client.head_object(Bucket=bucket, Key=key)
@@ -206,6 +317,15 @@ def retry(operation: Callable[[], None], attempts: int, delay_seconds: float) ->
 def upload_one(client, path: Path, bucket: str, key: str, retries: int) -> tuple[bool, str | None]:
     try:
         retry(lambda: client.upload_file(str(path), bucket, key), retries, 1.0)
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def download_one(client, bucket: str, key: str, dest: Path, retries: int) -> tuple[bool, str | None]:
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        retry(lambda: client.download_file(bucket, key, str(dest)), retries, 1.0)
         return True, None
     except Exception as exc:
         return False, str(exc)
@@ -301,43 +421,71 @@ def download_prefix(
     *,
     skip_existing: bool = True,
     dry_run: bool = False,
+    state_path: Path | None = None,
     retries: int = 3,
+    workers: int = 4,
     progress: Progress | None = None,
 ) -> SyncSummary:
     client = make_r2_client(endpoint_url)
     clean_prefix = prefix.strip("/")
     paginator = client.get_paginator("list_objects_v2")
+    output_dir = output_dir.resolve()
+    state = DownloadState(state_path or default_download_state_path(output_dir, prefix))
     downloaded = skipped = failed = bytes_downloaded = planned = 0
-    for page in paginator.paginate(Bucket=bucket, Prefix=clean_prefix):
-        for item in page.get("Contents", []):
-            key = item["Key"]
-            if key.endswith("/"):
-                continue
-            planned += 1
-            rel = key[len(clean_prefix) :].lstrip("/") if clean_prefix else key
-            dest = output_dir / rel
-            size = int(item.get("Size", 0))
-            if skip_existing and dest.exists() and dest.stat().st_size == size:
-                skipped += 1
-                if progress:
-                    progress("skip-local", dest, planned, 0)
-                continue
-            if dry_run:
-                skipped += 1
-                if progress:
-                    progress("dry-run", key, planned, 0)
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                retry(lambda: client.download_file(bucket, key, str(dest)), retries, 1.0)
-                downloaded += 1
-                bytes_downloaded += size
-                if progress:
-                    progress("download", dest, planned, 0)
-            except Exception:
-                failed += 1
-                if progress:
-                    progress("failed", key, planned, 0)
+    try:
+        pending_downloads: list[tuple[int, str, Path, dict]] = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=clean_prefix):
+            for item in page.get("Contents", []):
+                key = item["Key"]
+                if key.endswith("/"):
+                    continue
+                planned += 1
+                rel = key[len(clean_prefix) :].lstrip("/") if clean_prefix else key
+                dest = output_dir / rel
+                identity = remote_identity(item)
+                if skip_existing and download_state_matches(state.get(bucket, key), identity, dest):
+                    skipped += 1
+                    if progress:
+                        progress("skip-state", dest, planned, 0)
+                    continue
+                if skip_existing and dest.exists() and dest.stat().st_size == identity["size"]:
+                    state.record(bucket, key, dest, identity, "downloaded")
+                    skipped += 1
+                    if progress:
+                        progress("skip-local", dest, planned, 0)
+                    continue
+                if dry_run:
+                    skipped += 1
+                    if progress:
+                        progress("dry-run", key, planned, 0)
+                    continue
+
+                pending_downloads.append((planned, key, dest, identity))
+
+        if pending_downloads:
+            worker_count = max(1, workers)
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(download_one, client, bucket, key, dest, retries): (index, key, dest, identity)
+                    for index, key, dest, identity in pending_downloads
+                }
+                for future in as_completed(futures):
+                    index, key, dest, identity = futures[future]
+                    ok, error = future.result()
+                    if ok:
+                        state.record(bucket, key, dest, identity, "downloaded")
+                        downloaded += 1
+                        bytes_downloaded += identity["size"]
+                        if progress:
+                            progress("download", dest, index, planned)
+                    else:
+                        state.record(bucket, key, dest, identity, "failed", error=error)
+                        failed += 1
+                        if progress:
+                            progress("failed", key, index, planned)
+    finally:
+        state.close()
+
     return SyncSummary(
         downloaded=downloaded,
         skipped=skipped,

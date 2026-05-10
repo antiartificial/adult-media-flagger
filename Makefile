@@ -9,6 +9,7 @@ EXPORT ?= media_flags.jsonl
 PREFIX ?= twitter-media
 RESULTS_PREFIX ?= twitter-results
 STATE_DB ?= .adult-flag-r2-upload-$(subst /,_,$(PREFIX)).sqlite
+DOWNLOAD_STATE_DB ?= $(DOWNLOAD_DIR)/.adult-flag-r2-download-$(subst /,_,$(PREFIX)).sqlite
 LLAVA ?= review
 WORKERS ?= 4
 
@@ -65,4 +66,4 @@ r2-upload:
 	$(ADULT_FLAG) r2-upload "$(MEDIA_DIR)" --prefix "$(PREFIX)" --state-db "$(STATE_DB)" --workers "$(WORKERS)"
 
 r2-download:
-	$(ADULT_FLAG) r2-download "$(DOWNLOAD_DIR)" --prefix "$(PREFIX)"
+	$(ADULT_FLAG) r2-download "$(DOWNLOAD_DIR)" --prefix "$(PREFIX)" --state-db "$(DOWNLOAD_STATE_DB)" --workers "$(WORKERS)"

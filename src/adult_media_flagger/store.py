@@ -118,6 +118,11 @@ class Store:
             """
         )
 
+    def clear_error_results(self) -> int:
+        cursor = self.conn.execute("DELETE FROM adult_results WHERE decision = 'error'")
+        self.conn.commit()
+        return cursor.rowcount
+
     def save_result(
         self,
         media_id: int,
